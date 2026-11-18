@@ -1319,7 +1319,10 @@ void* worker_main(void*) {
 
 }  // namespace
 
-void start_worker() {
+// Definisi berkualifikasi: header mendeklarasikan
+// wildhunter::start_worker() — definisi global tanpa kualifikasi
+// TIDAK memenuhi deklarasi itu (linker: undefined symbol).
+void wildhunter::start_worker() {
     pthread_t th;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
