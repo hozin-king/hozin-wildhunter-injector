@@ -1,5 +1,13 @@
 // Hozin Wild Hunter 3D Injector — logika payload (di dalam proses game).
 //
+// v2.0 REWRITE TOTAL ke kerangka Traffic Rider (perintah user 18 Nov
+// 08:34, setelah v1.0 crash saat masuk berburu): hook Weapon.Update
+// sebagai driver per-frame (tangkap instance, kerja inline), hook
+// Weapon.Shoot/SpecialShoot (aimbot + no-reload), hook
+// PlayerCamera.get_ScreenCenter (redirect ray aimbot). ESP dari registry
+// statis ListedUnity<Animal>.mAll — TANPA FindObjectsOfType, TANPA
+// pompa Update generik. Worker hanya baca config + tulis status.
+//
 // Fitur (semua default OFF; game full offline — TANPA gate mode):
 //   aimbot/aimlock, auto-aim saat scope, ESP, no recoil, no reload,
 //   zoom jauh, energi tak habis, tambah koin (tombol sekali tap).

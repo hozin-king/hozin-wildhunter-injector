@@ -1,4 +1,4 @@
-# Hozin Wild Hunter 3D Injector v1.0
+# Hozin Wild Hunter 3D Injector v2.0
 
 Root injector (Kotlin + payload native) untuk **Wild Hunter 3D**
 (`com.julian.wildhunter`) **v1.0.16 / code 17**, Unity 2022.3.62f2 IL2CPP,
@@ -31,7 +31,8 @@ gagal nonaktif, bukan toggle palsu.
 4. **No recoil** — `WeaponData.maxRecoil` + `Shake` + `shock` = 0, dan
    `maxReticleRadius` disamakan dengan `minReticleRadius` (bidik tak
    mengembang). Nilai asli disimpan + dikembalikan saat toggle OFF.
-5. **No reload** — `Weapon.bulletsNum` ditahan di 99 tiap tick.
+5. **No reload** — `Weapon.bulletsNum` ditulis 99 SETELAH orig
+   `Shoot`/`SpecialShoot` mengurangi (post-shot, di hook tembakan).
 6. **Zoom jauh** — `Sight.mPower` = `mMaxPower` + `Sight.mZoomAmount` = 30.
 7. **Energi tak habis** — static `PlayerDataManager.currentPlayerEnergy`
    ditahan di 15 (`Max_Energy`) tiap tick.
@@ -39,10 +40,15 @@ gagal nonaktif, bukan toggle palsu.
    memanggil static `PlayerDataManager.AddCoinsOne(1000)` di main thread.
    Koin gameplay, bukan IAP gratis.
 
-Fitur aktif saat berburu stabil (instance `Weapon` ada ≥ 2000 ms) —
-selama transisi scene, pompa hanya mengecek "Weapon ada?" tiap 500 ms
-(pelajaran crash loading-ingame Sniper v1.0.5/v1.0.7: FindObjectsOfType
-di tengah transisi tersangka utama).
+Fitur aktif saat berburu stabil (instance `Weapon` yang sama sudah
+terlihat ≥ 2000 ms) — selama transisi scene, tick tidak mengerjakan
+apa-apa (pelajaran crash loading-ingame Sniper v1.0.5/v1.0.7:
+FindObjectsOfType di tengah transisi tersangka utama). **v2.0 REWRITE
+TOTAL ke kerangka Traffic Rider** (perintah user 18 Nov 08:34 setelah
+v1.0 crash saat masuk berburu): TIDAK ADA hook Update generik sebagai
+pompa, TIDAK ADA FindObjectsOfType dari thread mana pun. Driver =
+hook `Weapon.Update` (tangkap instance, kerja inline); ESP dari
+registry statis `ListedUnity<Animal>.mAll`.
 
 ## Yang sengaja TIDAK dibangun
 
@@ -58,12 +64,12 @@ speed/teleport/noclip. Klasifikasi lengkap di
   `Sight.mZoomAmount` 0x18, `PlayerCamera.mMaxFov` 0x304 — lihat
   `~/workspace/rea-wildhunter/REPORT-ARM64.md`) hanya referensi
   verifikasi; resolve runtime lewat nama field.
-- **Pompa main-thread**: hook `PlayerCamera.Update` (RVA 0x95B2E4, body
-  asli — prolog STP, bukan stub). Semua API Unity (FindObjectsOfType,
-  get_position, WorldToScreenPoint, invoke, field get/set) HANYA dari
-  pompa. Worker thread hanya baca config + tulis status/ESP + pasang
-  hook pompa (tanpa API Unity). Guard stub: instruksi pertama RET/B
-  → jangan hook.
+- **Driver main-thread (kerangka TR)**: hook `Weapon.Update` menangkap
+  instance lalu tick mengerjakan fitur inline (target+ESP dari registry
+  `ListedUnity<Animal>.mAll`, no-recoil/zoom/energi, perintah koin).
+  Semua API Unity HANYA dari hook main-thread. Worker thread hanya
+  baca config + tulis status (tanpa API Unity). Guard stub: instruksi
+  pertama RET/B → jangan hook.
 - **Dobby** (hook) commit `5dfc854` + 5 patch NDK modern (di
   `CMakeLists.txt`).
 - **Injector**: ptrace remote dlopen (arm64, kerangka Traffic Rider),
@@ -105,7 +111,7 @@ speed/teleport/noclip. Klasifikasi lengkap di
 ## Build
 
 APK **hanya** di GitHub Actions: push ke `main` → build → tag + rilis otomatis
-(`HozinWildHunterInjector-v1.0.apk`).
+(`HozinWildHunterInjector-v2.0.apk`).
 
 ## Struktur
 
