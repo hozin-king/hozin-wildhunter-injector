@@ -1,0 +1,11 @@
+# Keystore debug PERSISTEN — JANGAN PERNAH push (signer semua versi).
+# CI memakai secret DEBUG_KEYSTORE_BASE64 yang di-decode jadi debug.keystore.
+debug.keystore
+
+# Build outputs
+build/
+app/build/
+app/.cxx/
+local.properties
+*.iml
+.gradle/
