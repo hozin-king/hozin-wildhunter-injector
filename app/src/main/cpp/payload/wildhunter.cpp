@@ -1,4 +1,29 @@
-// Hozin Wild Hunter 3D Injector — payload v2.0.1 (KERANGKA TRAFFIC RIDER).
+// Hozin Wild Hunter 3D Injector — payload v2.0.2 (KERANGKA TRAFFIC RIDER).
+//
+// v2.0.2 — PERBAIKAN CEPAT (log tes POCO v2.0.1 run 09:36: STATUS=CRASH
+// padahal game HIDUP + INIT_STEP=ready + hook ok + inject dlopen=ok).
+// AKAR #1 (terbukti dari kode): STATUS=CRASH berasal dari file bukti
+// crash BASI run v1.0 (08:32, game crash saat masuk berburu). v1.0
+// menghapus file itu di awal worker (::remove), v2.0 menghilangkan
+// pembersihan itu saat rewrite, dan Kotlin v2.0.1 hanya menghapus
+// SETELAH dibaca — bila baca gagal, file basi menempel selamanya.
+// Perbaikan: worker hapus file di awal run + Kotlin hapus SEBELUM
+// inject + status kini memuat CRASH_DETAIL (isi file crash) supaya
+// vonis CRASH bisa dibuktikan dari status saja. (signal=11 di
+// inject.json BUKAN crash — itu trap normal dlopen remote, lr=0.)
+// AKAR #2 (terbukti dari kode): aimbot mengembalikan g_target.screenY
+// yang sudah dibalik (sh - scr.y, koordinat overlay) ke
+// get_ScreenCenter -> ScreenPointToRay memakai koordinat Unity (y dari
+// bawah) — bidikan tercermin vertikal. Perbaikan: target simpan
+// koordinat Unity (scr.y); flip hanya di entri ESP overlay.
+// AKAR #3 (terbukti dari kode): perintah koin aplikasi {"addcoins":1000}
+// tidak pernah jalan karena payload memeriksa kunci "coins".
+// Diagnostik baru: HOOK_CALLS + HOOK_LAST per hook di file status
+// (bedakan "hook tak pernah dipanggil" vs "logika fitur rusak").
+// Penangkap crash: tidak lagi menyentuh g_failedList (vector — tidak
+// aman di signal handler); re-raise sudah benar sejak v2.0.1.
+// Arsitektur TR v2.0 TIDAK berubah (driver tetap Weapon.Update —
+// TIDAK ada driver kedua dulu, itu rencana v2.1).
 //
 // v2.0.1 — PERBAIKAN INIT (log tes POCO v2.0 run 09:02: STATUS=INIT,
 // keempat hook gagal, PUMP=0, fitur mati total). AKAR: v2.0 menunggu
@@ -69,6 +94,7 @@
 #include <cmath>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -176,6 +202,17 @@ uintptr_t g_addrCenter = 0;
 // Jejak tick (diagnosis: apakah driver main-thread masih jalan).
 std::atomic<long long> g_lastTickMs{0};
 std::atomic<long long> g_tickCount{0};
+// v2.0.2: counter pemanggilan per hook + stempel terakhir (diagnosis:
+// bedakan "hook tak pernah dipanggil" dari "logika fitur rusak").
+// Dinaikkan di AWAL tiap hook (sebelum orig) — atomik, aman lintas thread.
+std::atomic<long long> g_callsUpdate{0};
+std::atomic<long long> g_callsShoot{0};
+std::atomic<long long> g_callsSpecial{0};
+std::atomic<long long> g_callsCenter{0};
+std::atomic<long long> g_lastCallUpdateMs{0};
+std::atomic<long long> g_lastCallShootMs{0};
+std::atomic<long long> g_lastCallSpecialMs{0};
+std::atomic<long long> g_lastCallCenterMs{0};
 void* g_weaponInst = nullptr;  // Weapon aktif (ditangkap hook)
 long long g_huntingSinceMs = 0;  // sejak kapan Weapon yang sama terlihat
 long long g_lastEspWriteMs = 0;  // throttle tulis JSON ESP (200 ms)
@@ -263,6 +300,16 @@ void write_status() {
                             : "UNSUPPORTED";
     }
     s += "\nFAILED=" + (failedStr.empty() ? std::string("-") : failedStr);
+    if (crashed) {
+        // v2.0.2: isi file bukti crash ikut di status (satu baris) —
+        // vonis CRASH harus bisa dibuktikan dari status saja, tanpa
+        // bergantung pada baca file terpisah yang bisa gagal.
+        std::string cj = read_file(kCrashPath);
+        for (char& c : cj) {
+            if (c == '\n' || c == '\r') c = ' ';
+        }
+        s += "\nCRASH_DETAIL=" + (cj.empty() ? std::string("-") : cj);
+    }
     // Ukuran file payload sendiri (diagnosis) via dladdr + stat.
     s += "\nLIBSIZE=";
     {
@@ -289,6 +336,20 @@ void write_status() {
     long long lp = g_lastTickMs.load();
     s += "\nPUMP=" + std::to_string(g_tickCount.load()) + " " +
          (lp ? std::to_string(now_ms() - lp) : std::string("-1"));
+    // v2.0.2: counter + jeda sejak panggilan terakhir per hook
+    // (HOOK_LAST: ms sejak panggilan terakhir, -1 = belum pernah).
+    auto msAgo = [](std::atomic<long long>& a) {
+        long long v = a.load();
+        return v ? std::to_string(now_ms() - v) : std::string("-1");
+    };
+    s += "\nHOOK_CALLS=update:" + std::to_string(g_callsUpdate.load()) +
+         ",shoot:" + std::to_string(g_callsShoot.load()) +
+         ",special:" + std::to_string(g_callsSpecial.load()) +
+         ",center:" + std::to_string(g_callsCenter.load());
+    s += "\nHOOK_LAST=update:" + msAgo(g_lastCallUpdateMs) +
+         ",shoot:" + msAgo(g_lastCallShootMs) +
+         ",special:" + msAgo(g_lastCallSpecialMs) +
+         ",center:" + msAgo(g_lastCallCenterMs);
     // v2.0.1: langkah init terakhir + alamat method hasil resolve.
     s += "\nINIT_STEP=" +
          (g_initStep.empty() ? std::string("-") : g_initStep);
@@ -980,7 +1041,12 @@ void update_target_and_esp() {
             g_target.headPos = head;
             g_target.camPos = camPos;
             g_target.screenX = scr.x;
-            g_target.screenY = sh - scr.y;
+            // v2.0.2: simpan koordinat UNITY (y dari bawah) — hook
+            // get_ScreenCenter mengembalikan ini ke ScreenPointToRay
+            // yang memakai koordinat Unity. Nilai lama (sh - scr.y,
+            // koordinat overlay) membuat bidikan tercermin vertikal.
+            // Flip ke koordinat layar (atas) hanya di entri ESP.
+            g_target.screenY = scr.y;
             g_target.timestampMs = now_ms();
             g_target.valid = true;
         }
@@ -1109,7 +1175,7 @@ void apply_features(const Config& cfg) {
 }
 
 // -------------------------------------------------------------- koin
-// Perintah dari aplikasi: {"cmd":"coins"} -> PlayerDataManager.
+// Perintah dari aplikasi: {"addcoins":1000} -> PlayerDataManager.
 // AddCoinsOne(1000) — DIIVOKE DARI TICK (main thread Unity), BUKAN
 // dari worker (v1.0 salah di sini: invoke dari worker butuh attach +
 // race). File perintah DIHAPUS setelah dibaca; cek tiap 2 dtk.
@@ -1121,11 +1187,19 @@ void check_coins_command() {
     std::string cmd = read_file(kCmdPath);
     if (cmd.empty()) return;
     unlink(kCmdPath);
-    if (json_bool(cmd, "coins")) {
+    // v2.0.2: aplikasi menulis {"addcoins":1000} — kunci lama "coins"
+    // tidak pernah cocok, jadi perintah koin tidak pernah jalan.
+    size_t keyPos = cmd.find("\"addcoins\"");
+    if (keyPos != std::string::npos) {
         int amount = 1000;
+        size_t colon = cmd.find(':', keyPos);
+        if (colon != std::string::npos) {
+            int v = atoi(cmd.c_str() + colon + 1);
+            if (v > 0 && v <= 100000) amount = v;
+        }
         void* args[1] = {&amount};
         if (invoke(g_r.pdmAddCoinsOne, nullptr, args)) {
-            LOGI("Tambah Koin +1000 (main thread)");
+            LOGI("Tambah Koin +%d (main thread)", amount);
         } else {
             LOGW("AddCoinsOne gagal");
         }
@@ -1140,6 +1214,8 @@ void check_coins_command() {
 // dihitung — TIDAK menghitung target sendiri (murah, tanpa panggilan
 // Unity tambahan).
 Vector2 hook_screen_center(void* thiz, void* method) {
+    g_callsCenter.fetch_add(1);
+    g_lastCallCenterMs.store(now_ms());
     auto it = g_origScreenCenter.find(method);
     ScreenCenterFn orig = (it != g_origScreenCenter.end()) ? it->second
                                                            : nullptr;
@@ -1175,6 +1251,15 @@ Vector2 hook_screen_center(void* thiz, void* method) {
 // Aimbot TIDAK di sini — target sudah dihitung tick, dan arah ray
 // dibelokkan hook get_ScreenCenter yang dipanggil Shoot sendiri.
 void hook_shoot(void* thiz, void* method) {
+    // Shoot vs SpecialShoot memakai hook yang sama — bedakan lewat
+    // pointer method (v2.0.2: counter per hook).
+    if (method == method_ptr(g_r.weaponShoot)) {
+        g_callsShoot.fetch_add(1);
+        g_lastCallShootMs.store(now_ms());
+    } else {
+        g_callsSpecial.fetch_add(1);
+        g_lastCallSpecialMs.store(now_ms());
+    }
     auto it = g_origShoot.find(method);
     ShootFn orig = (it != g_origShoot.end()) ? it->second : nullptr;
     if (thiz) {
@@ -1201,6 +1286,8 @@ void hook_shoot(void* thiz, void* method) {
 // lalu tick (target+ESP, fitur, koin). Satu-satunya kerja berkala
 // di payload — tidak ada pompa/worker enumerasi.
 void hook_weapon_update(void* thiz, void* method) {
+    g_callsUpdate.fetch_add(1);
+    g_lastCallUpdateMs.store(now_ms());
     auto it = g_origUpdate.find(method);
     UpdateFn orig = (it != g_origUpdate.end()) ? it->second : nullptr;
     if (orig) orig(thiz, method);
@@ -1284,10 +1371,11 @@ void install_hooks() {
 // saat loading berburu, file ini dibaca diagnosis inject BERIKUTNYA.
 // Handler async-signal-safe (hanya write/open/close + snprintf).
 void crash_handler(int sig, siginfo_t*, void*) {
-    const char* phase = "INIT";
-    if (g_coreResolved) {
-        phase = g_failedList.empty() ? "READY" : "PARTIAL";
-    }
+    // v2.0.2: JANGAN sentuh g_failedList di sini (std::vector —
+    // tidak aman di signal handler; fault saat worker mengubah
+    // vector = handler ikut crash). Fase cukup dari g_coreResolved;
+    // beda READY/PARTIAL ada di file status.
+    const char* phase = g_coreResolved ? "READY" : "INIT";
     int fd = open(kCrashPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) {
         char buf[512];
@@ -1330,6 +1418,12 @@ void install_crash_handler() {
 // tersangka crash). Semua hook dipasang SEKALI dari sini (init
 // thread) setelah resolve selesai.
 void* worker_main(void*) {
+    // v2.0.2: hapus bukti crash run lama SEBELUM status pertama —
+    // v1.0 melakukan ini (::remove), v2.0 menghilangkan pembersihan
+    // itu saat rewrite, sehingga file basi dari crash v1.0 (08:32)
+    // membuat SEMUA run berikutnya dilaporkan STATUS=CRASH meski
+    // payload tidak crash sama sekali.
+    ::unlink(kCrashPath);
     g_statusOverride = "INIT";
     g_initStep = "wait_libil2cpp";
     write_status();

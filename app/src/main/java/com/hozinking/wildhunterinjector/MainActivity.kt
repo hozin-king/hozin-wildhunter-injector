@@ -153,6 +153,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             // 5. Inject + diagnosis.
+            // v2.0.2: hapus bukti crash run lama SEBELUM inject — file
+            // basi dari crash v1.0 membuat status run ini dilaporkan
+            // CRASH meski payload tidak crash sama sekali.
+            InjectorBridge.clearCrashFile()
             val result = InjectorBridge.inject(this, pid)
             if (result.diag.isNotEmpty()) log(result.diag)
             log("injector exit=${result.exitCode}")
