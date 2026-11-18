@@ -25,8 +25,9 @@ import java.util.zip.ZipFile
  *
  * Gate versi: aplikasi TIDAK menolak berdasarkan versionCode. Gate ada
  * di payload — semua class/method IL2CPP harus ter-resolve berdasarkan
- * nama. Setelah inject, aplikasi membaca file status payload (±15 dtk)
- * dan menampilkan READY / PARTIAL / UNSUPPORTED / CRASH + nama yang gagal.
+ * nama. Setelah inject, aplikasi membaca file status payload (tunggu
+ * status final s.d. 60 dtk, v2.0.1) dan menampilkan READY / PARTIAL /
+ * UNSUPPORTED / CRASH + nama yang gagal.
  *
  * Config toggle (ditulis aplikasi, dibaca payload tiap 500 ms) dan data
  * ESP (ditulis payload, dibaca overlay aplikasi) sama-sama tinggal di
@@ -391,6 +392,13 @@ object InjectorBridge {
     fun readCrashFile(): String {
         val r = RootUtil.su("cat '$CRASH_PATH' 2>/dev/null")
         return r.output.trim()
+    }
+
+    /** Hapus bukti crash SETELAH dibaca + dicatat (MainActivity).
+     *  Tanpa ini, file basi membuat semua run berikutnya dilaporkan
+     *  STATUS=CRASH oleh payload (v2.0.1). */
+    fun clearCrashFile() {
+        RootUtil.su("rm -f '$CRASH_PATH' 2>/dev/null")
     }
 
     /**

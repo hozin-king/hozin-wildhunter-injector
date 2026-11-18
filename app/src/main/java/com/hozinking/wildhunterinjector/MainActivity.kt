@@ -23,7 +23,8 @@ import java.util.Locale
  * belum jalan, OTOMATIS launch game DULUAN (sebelum semua tunggu yang
  * lama — user mendarat di game dalam ~2 detik) → tunggu game siap
  * (libil2cpp ter-map maks 20 dtk + jeda settle 3 dtk) → inject otomatis
- * (retry 3x) → tunggu status payload 15 dtk → bila sukses, bawa user
+ * (retry 3x) → tunggu status payload final s.d. 60 dtk (v2.0.1: INIT
+ * bukan status akhir) → bila sukses, bawa user
  * ke game (bringGameToFront ala TR). Bila gagal, tetap di aplikasi
  * supaya diagnosis bisa disalin.
  *
@@ -167,7 +168,7 @@ class MainActivity : AppCompatActivity() {
             log("libpayload.so ter-map di game: ${if (mapped) "ya" else "tidak"}")
             var injectedOk = false
             if (result.exitCode == 0) {
-                val ps = waitForPayloadStatus(15)
+                val ps = waitForPayloadStatus(60)
                 val (rawStatus, statusSrc) = InjectorBridge.readPayloadStatusWithSource()
                 log("--- isi file status payload ---")
                 if (statusSrc.isNotEmpty()) log("status dari: $statusSrc")
@@ -180,6 +181,10 @@ class MainActivity : AppCompatActivity() {
                 val crash = InjectorBridge.readCrashFile()
                 if (crash.isNotEmpty()) {
                     log("--- bukti crash (hozinhunter_crash.json) ---\n$crash")
+                    // v2.0.1: hapus SETELAH dibaca + dicatat ke log run —
+                    // kalau tidak, file basi ini membuat SEMUA run
+                    // berikutnya dilaporkan STATUS=CRASH.
+                    InjectorBridge.clearCrashFile()
                 }
                 log("pompa main-thread: ${ps.pump} (panggilan, ms sejak terakhir)")
                 val pidFinal = InjectorBridge.findPid(InjectorBridge.TARGET_PACKAGE)
@@ -208,8 +213,8 @@ class MainActivity : AppCompatActivity() {
                         log("BuildID libil2cpp.so tidak tercatat — payload memakai nama, bukan offset")
                     }
                     else -> {
-                        log("inject exit 0 (dlopen OK) tapi status payload tak terbaca setelah 15 dtk — " +
-                            "payload mungkin masih init, atau file status tak bisa ditulis. Tap Inject ulang.")
+                        log("inject exit 0 (dlopen OK) tapi status payload tak kunjung final setelah 60 dtk — " +
+                            "payload mungkin masih init (lihat INIT_STEP di atas), atau file status tak bisa ditulis. Tap Inject ulang.")
                     }
                 }
             } else {
@@ -253,15 +258,22 @@ class MainActivity : AppCompatActivity() {
         if (ext == null) log("penyimpanan external tak tersedia — log run disimpan internal")
     }
 
-    /** Poll file status payload sampai timeout detik; status "" bila tak muncul. */
+    /** Poll file status payload sampai timeout detik; status "" bila tak muncul.
+     *  v2.0.1: INIT BUKAN status akhir — terus tunggu sampai READY /
+     *  PARTIAL / UNSUPPORTED / CRASH (init payload yang sehat bisa
+     *  butuh 30–60 dtk: cold start + domain IL2CPP). */
     private fun waitForPayloadStatus(timeoutSec: Int): InjectorBridge.PayloadStatus {
+        var last = InjectorBridge.PayloadStatus("", "-", "-", "-", "-", "-", "")
         repeat(timeoutSec * 2) {
             val raw = InjectorBridge.readPayloadStatus()
             val ps = InjectorBridge.parsePayloadStatus(raw)
-            if (ps.status.isNotEmpty()) return ps
+            if (ps.status.isNotEmpty()) last = ps
+            if (ps.status == "READY" || ps.status.startsWith("PARTIAL") ||
+                ps.status == "UNSUPPORTED" || ps.status.startsWith("CRASH")
+            ) return ps
             Thread.sleep(500)
         }
-        return InjectorBridge.PayloadStatus("", "-", "-", "-", "-", "-", "")
+        return last
     }
 
     private fun log(line: String) {

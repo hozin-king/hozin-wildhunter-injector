@@ -1,4 +1,18 @@
-// Hozin Wild Hunter 3D Injector — payload v2.0 (KERANGKA TRAFFIC RIDER).
+// Hozin Wild Hunter 3D Injector — payload v2.0.1 (KERANGKA TRAFFIC RIDER).
+//
+// v2.0.1 — PERBAIKAN INIT (log tes POCO v2.0 run 09:02: STATUS=INIT,
+// keempat hook gagal, PUMP=0, fitur mati total). AKAR: v2.0 menunggu
+// libil2cpp.so muncul di /proc/self/maps lalu resolve SEKALI — padahal
+// ".so ter-map" BELUM berarti domain IL2CPP siap (il2cpp_init +
+// assembly selesai beberapa detik SESUDAH mapping); resolve yang jalan
+// di jendela itu menemukan SEMUA class NULL -> UNSUPPORTED -> hook
+// tak pernah dipasang, tanpa retry. v1.0 TIDAK kena ini karena
+// load+resolve diulang tiap 500 ms s.d. 60 dtk (terbukti READY).
+// Perbaikan: kembalikan loop retry (s.d. 90 dtk) + diagnostik granular
+// INIT_STEP + ADDRS di file status + retry pasang hook tiap 2 dtk +
+// penangkap crash dipasang di start_worker (sebelum thread dibuat).
+// Arsitektur TR v2.0 TIDAK berubah (driver Weapon.Update, registry
+// mAll, tanpa FindObjectsOfType, tanpa pompa Update generik).
 //
 // REWRITE TOTAL dari v1.0 (perintah user 18 Nov 08:34, setelah v1.0
 // crash saat masuk berburu): v1.0 memakai pompa main-thread via hook
@@ -148,10 +162,17 @@ int g_screenW = 0, g_screenH = 0;  // ukuran layar (ditulis tick)
 std::vector<std::string> g_failedList;  // nama yang gagal resolve/hook
 bool g_coreResolved = false;
 std::string g_statusOverride;  // "INIT" sebelum resolve selesai
+std::string g_initStep;  // v2.0.1: langkah init terakhir (diagnosis INIT macet di mana)
 bool g_hookUpdate = false;     // hook Weapon.Update terpasang (driver)
 bool g_hookShoot = false;      // hook Weapon.Shoot terpasang
 bool g_hookSpecialShoot = false;  // hook Weapon.SpecialShoot terpasang
 bool g_hookCenter = false;     // hook get_ScreenCenter terpasang (aimbot)
+// v2.0.1: alamat method hasil resolve (0 = resolve gagal) — bedakan
+// "resolve gagal" dari "Dobby gagal" di file status.
+uintptr_t g_addrUpdate = 0;
+uintptr_t g_addrShoot = 0;
+uintptr_t g_addrSpecial = 0;
+uintptr_t g_addrCenter = 0;
 // Jejak tick (diagnosis: apakah driver main-thread masih jalan).
 std::atomic<long long> g_lastTickMs{0};
 std::atomic<long long> g_tickCount{0};
@@ -268,6 +289,20 @@ void write_status() {
     long long lp = g_lastTickMs.load();
     s += "\nPUMP=" + std::to_string(g_tickCount.load()) + " " +
          (lp ? std::to_string(now_ms() - lp) : std::string("-1"));
+    // v2.0.1: langkah init terakhir + alamat method hasil resolve.
+    s += "\nINIT_STEP=" +
+         (g_initStep.empty() ? std::string("-") : g_initStep);
+    {
+        char abuf[160];
+        snprintf(abuf, sizeof(abuf),
+                 "update:0x%llx,shoot:0x%llx,special:0x%llx,center:0x%llx",
+                 (unsigned long long)g_addrUpdate,
+                 (unsigned long long)g_addrShoot,
+                 (unsigned long long)g_addrSpecial,
+                 (unsigned long long)g_addrCenter);
+        s += "\nADDRS=";
+        s += abuf;
+    }
     s += "\n";
     write_file(kStatusTmp, s);
     write_file(kStatusCache, s);
@@ -281,6 +316,19 @@ void add_failed(const char* name) {
         if (e == n) return;
     }
     g_failedList.push_back(n);
+}
+
+// Hapus entri gagal bila percobaan ulang BERHASIL (retry resolve /
+// retry hook) — supaya status tidak macet PARTIAL padahal semua jalan.
+void erase_failed(const char* name) {
+    if (name == nullptr || name[0] == '\0') return;
+    std::string n(name);
+    for (auto it = g_failedList.begin(); it != g_failedList.end(); ++it) {
+        if (*it == n) {
+            g_failedList.erase(it);
+            return;
+        }
+    }
 }
 
 // ------------------------------------------------------- nilai primitif
@@ -551,6 +599,15 @@ std::string read_il2cpp_string(Il2CppObject* strObj) {
 // nonaktif, bukan toggle palsu). Nama yang core (bila hilang game
 // tidak bisa dimodifikasi sama sekali) -> UNSUPPORTED.
 void resolve_all() {
+    // Percobaan ulang (retry init): bersihkan hasil percobaan
+    // sebelumnya — kegagalan sesaat (domain belum siap) tidak boleh
+    // menempel bila percobaan berikut berhasil.
+    g_failedList.clear();
+    g_coreResolved = false;
+    g_addrUpdate = 0;
+    g_addrShoot = 0;
+    g_addrSpecial = 0;
+    g_addrCenter = 0;
     auto needClass = [](Il2CppClass*& dst, const char* ns, const char* name,
                         const char* fail, bool core) {
         dst = find_class(ns, name);
@@ -705,6 +762,11 @@ void resolve_all() {
              "PARTIAL");
         add_failed("field:mAll");
     }
+    // Catat alamat hasil resolve untuk diagnosis (ADDRS di status).
+    g_addrUpdate = (uintptr_t)method_ptr(g_r.weaponUpdate);
+    g_addrShoot = (uintptr_t)method_ptr(g_r.weaponShoot);
+    g_addrSpecial = (uintptr_t)method_ptr(g_r.weaponSpecialShoot);
+    g_addrCenter = (uintptr_t)method_ptr(g_r.playerCameraGetScreenCenter);
     LOGI("resolve selesai: core=%d failed=%zu", (int)g_coreResolved,
          g_failedList.size());
 }
@@ -1162,11 +1224,15 @@ bool install_hook(void* addr, void* hook, Fn* origOut,
         return false;
     }
     *origOut = reinterpret_cast<Fn>(orig);
+    erase_failed(failName);  // v2.0.1: retry yang berhasil hapus entri gagal
     return true;
 }
 
 void install_hooks() {
-    if (g_r.weaponUpdate) {
+    // Guard flag: hanya pasang hook yang BELUM terpasang — retry dari
+    // worker loop (v2.0.1) tidak boleh memanggil DobbyHook dua kali
+    // pada alamat yang sama.
+    if (g_r.weaponUpdate && !g_hookUpdate) {
         UpdateFn orig = nullptr;
         if (install_hook(method_ptr(g_r.weaponUpdate),
                          reinterpret_cast<void*>(&hook_weapon_update),
@@ -1174,10 +1240,10 @@ void install_hooks() {
             g_origUpdate[method_ptr(g_r.weaponUpdate)] = orig;
             g_hookUpdate = true;
         }
-    } else {
+    } else if (!g_r.weaponUpdate) {
         add_failed("hook:WeaponUpdate");
     }
-    if (g_r.weaponShoot) {
+    if (g_r.weaponShoot && !g_hookShoot) {
         ShootFn orig = nullptr;
         if (install_hook(method_ptr(g_r.weaponShoot),
                          reinterpret_cast<void*>(&hook_shoot), &orig,
@@ -1186,7 +1252,7 @@ void install_hooks() {
             g_hookShoot = true;
         }
     }
-    if (g_r.weaponSpecialShoot) {
+    if (g_r.weaponSpecialShoot && !g_hookSpecialShoot) {
         ShootFn orig = nullptr;
         if (install_hook(method_ptr(g_r.weaponSpecialShoot),
                          reinterpret_cast<void*>(&hook_shoot), &orig,
@@ -1195,7 +1261,7 @@ void install_hooks() {
             g_hookSpecialShoot = true;
         }
     }
-    if (g_r.playerCameraGetScreenCenter) {
+    if (g_r.playerCameraGetScreenCenter && !g_hookCenter) {
         ScreenCenterFn orig = nullptr;
         if (install_hook(method_ptr(g_r.playerCameraGetScreenCenter),
                          reinterpret_cast<void*>(&hook_screen_center),
@@ -1265,36 +1331,63 @@ void install_crash_handler() {
 // thread) setelah resolve selesai.
 void* worker_main(void*) {
     g_statusOverride = "INIT";
+    g_initStep = "wait_libil2cpp";
     write_status();
 
-    // Cold start: libil2cpp.so butuh >20 dtk untuk ter-map (bukti tes
-    // POCO v1.0). Tunggu sampai ada, jangan buru-buru menyerah.
-    for (int i = 0; i < 240; i++) {
-        if (access("/proc/self/maps", F_OK) == 0) {
-            std::string maps = read_file("/proc/self/maps");
-            if (maps.find("libil2cpp.so") != std::string::npos) break;
+    // Cold start: libil2cpp.so baru ter-map >20 dtk setelah game
+    // dibuka (bukti tes POCO v1.0/v2.0), DAN ".so ter-map" BELUM
+    // berarti domain IL2CPP siap — il2cpp_init (domain + assembly)
+    // selesai beberapa detik SESUDAH mapping. v2.0 menunggu .so
+    // muncul di /proc/self/maps lalu resolve SEKALI: bila resolve
+    // jalan di jendela itu, SEMUA class NULL -> UNSUPPORTED -> hook
+    // tak pernah dipasang, tanpa retry (akar macet INIT v2.0).
+    // Perbaikan (pola v1.0 yang terbukti READY): ulangi load+resolve
+    // tiap 500 ms s.d. 90 dtk. INIT_STEP di file status menunjukkan
+    // percobaan ke berapa + apa yang gagal terakhir.
+    const long long initStart = now_ms();
+    long long lastStepWrite = 0;
+    int attempt = 0;
+    while (!g_coreResolved) {
+        attempt++;
+        g_initStep = "resolve:attempt " + std::to_string(attempt);
+        if (load_il2cpp()) {
+            resolve_all();
+            if (g_coreResolved) break;
+            g_initStep = "resolve_failed:" +
+                         (g_failedList.empty() ? std::string("?")
+                                               : g_failedList.front());
+        } else {
+            g_initStep = "wait_libil2cpp";
+        }
+        const long long t = now_ms();
+        if (t - lastStepWrite >= 2000) {
+            write_status();
+            lastStepWrite = t;
+        }
+        if (t - initStart > 90000) {
+            LOGE("init gagal setelah 90 dtk -> UNSUPPORTED");
+            add_failed("init:timeout");
+            g_initStep = "timeout";
+            g_statusOverride.clear();
+            write_status();
+            return nullptr;
         }
         usleep(500 * 1000);
     }
-    if (!load_il2cpp()) {
-        LOGE("load il2cpp gagal -> UNSUPPORTED");
-        g_coreResolved = false;
-        add_failed("load:libil2cpp");
-        g_statusOverride.clear();
-        write_status();
-        return nullptr;
-    }
+
     Il2CppDomain* domain = g_api.domain_get();
     if (domain && g_api.thread_attach) g_api.thread_attach(domain);
-    install_crash_handler();
 
-    resolve_all();
-    if (g_coreResolved) install_hooks();
+    g_initStep = "hook_install";
+    write_status();
+    install_hooks();
 
+    g_initStep = "ready";
     g_statusOverride.clear();
     write_status();
 
     long long lastStatus = 0;
+    long long lastHookRetry = 0;
     while (true) {
         std::string cfg = read_file(kCfgPath);
         if (!cfg.empty()) {
@@ -1308,6 +1401,13 @@ void* worker_main(void*) {
             g_config.energy = json_bool(cfg, "energy");
         }
         long long t = now_ms();
+        // Retry pasang hook yang sempat gagal (Dobby sesaat gagal
+        // saat .so masih di-relokasi): hanya hook yang belum
+        // terpasang (guard flag di install_hooks).
+        if (t - lastHookRetry >= 2000) {
+            install_hooks();
+            lastHookRetry = t;
+        }
         if (t - lastStatus >= 2000) {
             write_status();
             lastStatus = t;
@@ -1323,6 +1423,10 @@ void* worker_main(void*) {
 // wildhunter::start_worker() — definisi global tanpa kualifikasi
 // TIDAK memenuhi deklarasi itu (linker: undefined symbol).
 void wildhunter::start_worker() {
+    // Pasang penangkap crash SEBELUM worker dibuat (v2.0.1: v2.0
+    // memasangnya di dalam worker SETELAH load_il2cpp — crash saat
+    // resolve awal tidak meninggalkan bukti).
+    install_crash_handler();
     pthread_t th;
     pthread_attr_t attr;
     pthread_attr_init(&attr);

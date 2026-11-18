@@ -1,4 +1,4 @@
-# Hozin Wild Hunter 3D Injector v2.0
+# Hozin Wild Hunter 3D Injector v2.0.1
 
 Root injector (Kotlin + payload native) untuk **Wild Hunter 3D**
 (`com.julian.wildhunter`) **v1.0.16 / code 17**, Unity 2022.3.62f2 IL2CPP,
@@ -111,7 +111,16 @@ speed/teleport/noclip. Klasifikasi lengkap di
 ## Build
 
 APK **hanya** di GitHub Actions: push ke `main` → build → tag + rilis otomatis
-(`HozinWildHunterInjector-v2.0.apk`).
+(`HozinWildHunterInjector-v2.0.1.apk`).
+
+## Riwayat versi
+- **v2.0.1** — perbaikan init v2.0: loop retry load+resolve s.d. 90 dtk
+  (v2.0 resolve sekali tepat saat .so muncul, padahal domain IL2CPP
+  belum siap → semua class NULL → hook tak pernah dipasang);
+  diagnostik `INIT_STEP` + `ADDRS` di file status; retry pasang hook;
+  injector tunggu status final s.d. 60 dtk; bukti crash dihapus
+  setelah dibaca (anti STATUS=CRASH basi).
+- **v2.0** — rewrite total ke kerangka Traffic Rider.
 
 ## Struktur
 
