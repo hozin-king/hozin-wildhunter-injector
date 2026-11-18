@@ -11,8 +11,8 @@ android {
         applicationId = "com.hozinking.wildhunterinjector"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "2.1"
+        versionCode = 6
+        versionName = "2.2"
 
         ndk {
             abiFilters += "arm64-v8a"

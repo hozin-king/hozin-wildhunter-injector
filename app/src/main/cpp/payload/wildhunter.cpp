@@ -1,4 +1,30 @@
-// Hozin Wild Hunter 3D Injector — payload v2.1 (KERANGKA TRAFFIC RIDER).
+// Hozin Wild Hunter 3D Injector — payload v2.2 (KERANGKA TRAFFIC RIDER).
+//
+// v2.2 — PERBAIKAN FITUR-MATI (tes POCO v2.1 10:56: game jalan normal
+// — bug orig v2.0.2 TERBUKTI sembuh — TAPI cheat tetap tidak work).
+// AKAR #1 (aimbot + ESP, terbukti dari alur kode): update_target_and_esp
+// bergantung pada Camera.get_main sebagai SATU-SATUNYA sumber kamera.
+// Bila kamera game tidak bertag MainCamera, get_main mengembalikan
+// null dan fungsi itu return di baris pertama TIAP frame — target
+// tidak pernah dihitung (aimbot mati), entri ESP kosong (ESP mati).
+// Perbaikan: ambil kamera dari PlayerCamera.mMainCamera (0xD0, dump.cs)
+// lewat SingletonUnity<PlayerCamera>.get_Instance — field yang dipakai
+// game sendiri (disassembly Shoot memanggil GetComponent<Camera> pada
+// instance PlayerCamera); Camera.get_main hanya fallback.
+// AKAR #2 (silent death semua fitur tulis-field): obj_alive() membaca
+// m_CachedPtr (0x10) — HANYA bermakna untuk UnityEngine.Object.
+// Dipakai juga pada WeaponData / Sight / AnimalData / List<T> yang
+// adalah class C# biasa: offset 0x10 di mereka adalah field biasa
+// (string tableName, float mMinPower, string AnimalName, _items) —
+// ceknya tidak bermakna dan bisa mematikan fitur diam-diam bila nilai
+// itu nol. Perbaikan: cek null biasa untuk class biasa; obj_alive
+// HANYA untuk UnityEngine.Object (Camera, Transform, Animal, Weapon).
+// ESP: file kiriman user ESP_3_thnu.h disalin verbatim ke payload +
+// StructsCommon.h minimal; perilaku gambarnya (DrawBox 4 garis,
+// DrawHorizontalHealthBar, DrawCrosshair) di-port 1:1 ke EspView.kt —
+// class ESP (JNI) tidak bisa dipanggil lintas proses: payload jalan
+// di proses game, kanvas overlay hidup di proses aplikasi. Jalur data
+// tetap JSON (payload hitung posisi di dalam game, aplikasi menggambar).
 //
 // v2.1 — PERBAIKAN ORIG (log tes POCO v2.0.2 10:37: toggle ON tapi fitur
 // tidak jalan + visual senjata stuck/rusak).
@@ -482,6 +508,12 @@ struct Resolved {
     Il2CppMethodOpaque* weaponShoot = nullptr;
     Il2CppMethodOpaque* weaponSpecialShoot = nullptr;
     Il2CppMethodOpaque* playerCameraGetScreenCenter = nullptr;
+    // v2.2: sumber kamera utama — SingletonUnity<PlayerCamera>.
+    // get_Instance (dari parent, dicari find_method yang menelusuri
+    // parent) + field mMainCamera (0xD0, dump.cs). Camera.get_main
+    // hanya fallback bila salah satu langkah ini gagal.
+    Il2CppMethodOpaque* playerCameraGetInstance = nullptr;
+    Il2CppField* playerCameraMainCamera = nullptr;
     Il2CppMethodOpaque* animalGetIsALive = nullptr;
     Il2CppMethodOpaque* animalGetPosition = nullptr;
     Il2CppMethodOpaque* animalGetCenterPosition = nullptr;
@@ -641,6 +673,12 @@ bool field_set(Il2CppObject* obj, Il2CppField* f, const T& v) {
 // sudah dihancurkan: panggilan Unity apa pun atasnya (get_position,
 // WorldToScreenPoint, get_name) crash di native. Cek ini SEBELUM
 // setiap panggilan Unity (pelajaran tombstone TR v1.4).
+// HANYA untuk class turunan UnityEngine.Object (Camera, Transform,
+// Animal, Weapon, ...). JANGAN dipakai pada class C# biasa
+// (WeaponData, Sight, AnimalData, List<T>): offset 0x10 di mereka
+// adalah field biasa (string/float/_items) — ceknya tidak bermakna
+// dan bisa mematikan fitur diam-diam (akar v2.2). Untuk class biasa
+// cukup cek pointer null.
 bool obj_alive(void* o) {
     if (o == nullptr) return false;
     return *reinterpret_cast<void**>(reinterpret_cast<char*>(o) + 0x10) !=
@@ -772,6 +810,14 @@ void resolve_all() {
                "method:Weapon.SpecialShoot", false);
     needMethod(g_r.playerCameraGetScreenCenter, g_r.playerCameraClass,
                "get_ScreenCenter", 0, "method:get_ScreenCenter", false);
+    // v2.2: sumber kamera utama (non-core — get_main jadi fallback).
+    // get_Instance dideklarasi di parent SingletonUnity<PlayerCamera>;
+    // find_method menelusuri parent, jadi resolve dari class
+    // PlayerCamera langsung.
+    needMethod(g_r.playerCameraGetInstance, g_r.playerCameraClass,
+               "get_Instance", 0, "method:get_Instance", false);
+    needField(g_r.playerCameraMainCamera, g_r.playerCameraClass,
+              "mMainCamera", "field:mMainCamera", false);
     needMethod(g_r.animalGetIsALive, g_r.animalClass, "get_IsALive", 0,
                "method:Animal.get_IsALive", false);
     needMethod(g_r.animalGetPosition, g_r.animalClass, "get_Position", 0,
@@ -921,7 +967,23 @@ void update_target_and_esp() {
     g_entries.clear();
     if (!g_r.listedAnimalAll) return;
 
-    Il2CppObject* camObj = invoke(g_r.cameraGetMain, nullptr, nullptr);
+    Il2CppObject* camObj = nullptr;
+    // v2.2: sumber kamera UTAMA — PlayerCamera.mMainCamera (field yang
+    // dipakai game sendiri; disassembly Shoot memanggil
+    // GetComponent<Camera> pada instance PlayerCamera). Camera.get_main
+    // hanya fallback: bila kamera tidak bertag MainCamera, get_main
+    // mengembalikan null dan SELURUH fungsi ini mati tiap frame
+    // (akar aimbot + ESP tidak work di v2.1).
+    if (g_r.playerCameraGetInstance && g_r.playerCameraMainCamera) {
+        Il2CppObject* pcObj =
+            invoke(g_r.playerCameraGetInstance, nullptr, nullptr);
+        if (pcObj && obj_alive(pcObj)) {
+            field_get(pcObj, g_r.playerCameraMainCamera, camObj);
+        }
+    }
+    if (!camObj) {
+        camObj = invoke(g_r.cameraGetMain, nullptr, nullptr);
+    }
     if (!camObj || !obj_alive(camObj)) return;
     Il2CppObject* camTransform =
         invoke(g_r.componentGetTransform, camObj, nullptr);
@@ -943,7 +1005,9 @@ void update_target_and_esp() {
 
     void* listObj = nullptr;
     g_api.field_static_get_value(g_r.listedAnimalAll, &listObj);
-    if (!listObj || !obj_alive(listObj)) return;
+    // v2.2: List<T> BUKAN UnityEngine.Object — jangan obj_alive
+    // (offset 0x10-nya adalah _items, bukan m_CachedPtr).
+    if (!listObj) return;
     void* items = *reinterpret_cast<void**>(
         reinterpret_cast<char*>(listObj) + 0x10);
     int32_t size = *reinterpret_cast<int32_t*>(
@@ -1033,8 +1097,9 @@ void update_target_and_esp() {
         }
         std::string name = "hewan";
         Il2CppObject* ad = nullptr;
+        // v2.2: AnimalData class biasa — cukup cek null, bukan obj_alive.
         if (field_get(animal, g_r.animalDataField, ad) && ad &&
-            obj_alive(ad) && g_r.animalDataDisplayName) {
+            g_r.animalDataDisplayName) {
             Il2CppObject* strObj = nullptr;
             field_get(ad, g_r.animalDataDisplayName, strObj);
             std::string nm = read_il2cpp_string(strObj);
@@ -1134,7 +1199,9 @@ void apply_features(const Config& cfg) {
     Il2CppObject* wd = nullptr;
     field_get(reinterpret_cast<Il2CppObject*>(weapon),
               g_r.weaponDataField, wd);
-    if (wd && obj_alive(wd)) {
+    // v2.2: WeaponData class biasa — cukup cek null, bukan obj_alive
+    // (offset 0x10-nya string tableName, bukan m_CachedPtr).
+    if (wd) {
         if (cfg.noRecoil) {
             if (!g_wdOrig.saved) {
                 field_get(wd, g_r.wdMaxRecoil, g_wdOrig.maxRecoil);
@@ -1163,7 +1230,9 @@ void apply_features(const Config& cfg) {
     Il2CppObject* sight = nullptr;
     field_get(reinterpret_cast<Il2CppObject*>(weapon),
               g_r.weaponSightField, sight);
-    if (sight && obj_alive(sight)) {
+    // v2.2: Sight class biasa — cukup cek null, bukan obj_alive
+    // (offset 0x10-nya float mMinPower, bukan m_CachedPtr).
+    if (sight) {
         if (cfg.zoomFar) {
             if (!g_sightOrig.saved) {
                 field_get(sight, g_r.sightPower, g_sightOrig.power);
