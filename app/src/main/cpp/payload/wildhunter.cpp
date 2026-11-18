@@ -1,4 +1,19 @@
-// Hozin Wild Hunter 3D Injector — payload v2.0.2 (KERANGKA TRAFFIC RIDER).
+// Hozin Wild Hunter 3D Injector — payload v2.1 (KERANGKA TRAFFIC RIDER).
+//
+// v2.1 — PERBAIKAN ORIG (log tes POCO v2.0.2 10:37: toggle ON tapi fitur
+// tidak jalan + visual senjata stuck/rusak).
+// AKAR (terbukti dari kode): orig TIDAK PERNAH dipanggil di keempat hook.
+// Map orig di-key methodPointer (alamat kode), tapi hook menerima
+// MethodInfo* sebagai argumen kedua — find(method) selalu gagal.
+// Akibat: Weapon.Shoot tidak pernah menembak, Weapon.Update tidak
+// pernah menjalankan FSM senjata + Sight (senjata beku, visual stuck),
+// get_ScreenCenter jatuh ke fallback tengah layar. Perbaikan: satu
+// global orig per hook (pola TR); hook Shoot/SpecialShoot dipisah jadi
+// dua wrapper tipis supaya counter shoot/special benar. Driver TETAP
+// Weapon.Update — TIDAK diganti ke SightReticle.Update: Weapon.Update
+// private non-virtual tanpa subclass override (dump.cs), Unity
+// memanggilnya lewat methodPointer yang di-hook; yang rusak adalah
+// dispatch orig, bukan drivernya.
 //
 // v2.0.2 — PERBAIKAN CEPAT (log tes POCO v2.0.1 run 09:36: STATUS=CRASH
 // padahal game HIDUP + INIT_STEP=ready + hook ok + inject dlopen=ok).
@@ -99,7 +114,6 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <fstream>
-#include <map>
 #include <mutex>
 #include <pthread.h>
 #include <string>
@@ -232,14 +246,18 @@ struct SightOrig {
 SightOrig g_sightOrig;
 Config g_prevTickConfig;
 
-// Simpan orig fungsi yang di-hook (key = methodPointer agar hook
-// multi-instance tidak menimpa orig).
+// Simpan orig fungsi yang di-hook — SATU global per hook (pola TR).
+// JANGAN map keyed by methodPointer: hook menerima MethodInfo* sebagai
+// argumen kedua, BUKAN alamat kode — find(method) selalu gagal dan
+// orig tidak pernah dipanggil (akar v2.0.2: Shoot mati total, FSM
+// senjata beku, Sight beku).
 typedef void (*UpdateFn)(void* thiz, void* method);
 typedef void (*ShootFn)(void* thiz, void* method);
 typedef Vector2 (*ScreenCenterFn)(void* thiz, void* method);
-std::map<void*, UpdateFn> g_origUpdate;
-std::map<void*, ShootFn> g_origShoot;
-std::map<void*, ScreenCenterFn> g_origScreenCenter;
+UpdateFn g_origWeaponUpdate = nullptr;
+ShootFn g_origWeaponShoot = nullptr;
+ShootFn g_origWeaponSpecialShoot = nullptr;
+ScreenCenterFn g_origScreenCenter = nullptr;
 
 // Il2CppMethodOpaque dengan methodPointer di offset 0 (lihat
 // il2cpp_api.h) — dipakai untuk menunjuk orig yang benar.
@@ -1216,9 +1234,7 @@ void check_coins_command() {
 Vector2 hook_screen_center(void* thiz, void* method) {
     g_callsCenter.fetch_add(1);
     g_lastCallCenterMs.store(now_ms());
-    auto it = g_origScreenCenter.find(method);
-    ScreenCenterFn orig = (it != g_origScreenCenter.end()) ? it->second
-                                                           : nullptr;
+    ScreenCenterFn orig = g_origScreenCenter;
     Config cfg;
     CachedTarget tgt;
     bool scope = false;
@@ -1250,18 +1266,18 @@ Vector2 hook_screen_center(void* thiz, void* method) {
 // lalu no-reload: Shoot mengurangi bulletsNum 1 -> tahan di 99.
 // Aimbot TIDAK di sini — target sudah dihitung tick, dan arah ray
 // dibelokkan hook get_ScreenCenter yang dipanggil Shoot sendiri.
-void hook_shoot(void* thiz, void* method) {
-    // Shoot vs SpecialShoot memakai hook yang sama — bedakan lewat
-    // pointer method (v2.0.2: counter per hook).
-    if (method == method_ptr(g_r.weaponShoot)) {
+// Dua wrapper tipis (satu per method) supaya counter shoot/special
+// benar — bandingkan `method` (MethodInfo*) dengan alamat kode selalu
+// salah (akar yang sama dengan hilangnya orig di v2.0.2).
+void hook_shoot_impl(void* thiz, void* method, bool isShoot,
+                     ShootFn orig) {
+    if (isShoot) {
         g_callsShoot.fetch_add(1);
         g_lastCallShootMs.store(now_ms());
     } else {
         g_callsSpecial.fetch_add(1);
         g_lastCallSpecialMs.store(now_ms());
     }
-    auto it = g_origShoot.find(method);
-    ShootFn orig = (it != g_origShoot.end()) ? it->second : nullptr;
     if (thiz) {
         long long t = now_ms();
         if (thiz != g_weaponInst) {
@@ -1282,14 +1298,21 @@ void hook_shoot(void* thiz, void* method) {
               ammo);
 }
 
+void hook_shoot(void* thiz, void* method) {
+    hook_shoot_impl(thiz, method, true, g_origWeaponShoot);
+}
+
+void hook_special_shoot(void* thiz, void* method) {
+    hook_shoot_impl(thiz, method, false, g_origWeaponSpecialShoot);
+}
+
 // Hook Weapon.Update: DRIVER utama. Tangkap Weapon, panggil orig,
 // lalu tick (target+ESP, fitur, koin). Satu-satunya kerja berkala
 // di payload — tidak ada pompa/worker enumerasi.
 void hook_weapon_update(void* thiz, void* method) {
     g_callsUpdate.fetch_add(1);
     g_lastCallUpdateMs.store(now_ms());
-    auto it = g_origUpdate.find(method);
-    UpdateFn orig = (it != g_origUpdate.end()) ? it->second : nullptr;
+    UpdateFn orig = g_origWeaponUpdate;
     if (orig) orig(thiz, method);
     if (thiz) tick(thiz);
 }
@@ -1324,7 +1347,7 @@ void install_hooks() {
         if (install_hook(method_ptr(g_r.weaponUpdate),
                          reinterpret_cast<void*>(&hook_weapon_update),
                          &orig, "hook:WeaponUpdate")) {
-            g_origUpdate[method_ptr(g_r.weaponUpdate)] = orig;
+            g_origWeaponUpdate = orig;
             g_hookUpdate = true;
         }
     } else if (!g_r.weaponUpdate) {
@@ -1335,16 +1358,16 @@ void install_hooks() {
         if (install_hook(method_ptr(g_r.weaponShoot),
                          reinterpret_cast<void*>(&hook_shoot), &orig,
                          "hook:WeaponShoot")) {
-            g_origShoot[method_ptr(g_r.weaponShoot)] = orig;
+            g_origWeaponShoot = orig;
             g_hookShoot = true;
         }
     }
     if (g_r.weaponSpecialShoot && !g_hookSpecialShoot) {
         ShootFn orig = nullptr;
         if (install_hook(method_ptr(g_r.weaponSpecialShoot),
-                         reinterpret_cast<void*>(&hook_shoot), &orig,
+                         reinterpret_cast<void*>(&hook_special_shoot), &orig,
                          "hook:WeaponSpecialShoot")) {
-            g_origShoot[method_ptr(g_r.weaponSpecialShoot)] = orig;
+            g_origWeaponSpecialShoot = orig;
             g_hookSpecialShoot = true;
         }
     }
@@ -1353,8 +1376,7 @@ void install_hooks() {
         if (install_hook(method_ptr(g_r.playerCameraGetScreenCenter),
                          reinterpret_cast<void*>(&hook_screen_center),
                          &orig, "hook:get_ScreenCenter")) {
-            g_origScreenCenter[method_ptr(g_r.playerCameraGetScreenCenter)] =
-                orig;
+            g_origScreenCenter = orig;
             g_hookCenter = true;
         }
     }
